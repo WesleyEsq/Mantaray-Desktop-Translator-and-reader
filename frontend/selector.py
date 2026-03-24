@@ -1,16 +1,16 @@
-from PySide6.QtWidgets import QWidget, QRubberBand, QApplication
+from PySide6.QtWidgets import QWidget, QRubberBand
 from PySide6.QtGui import QPainter, QColor, QMouseEvent, QKeyEvent
 from PySide6.QtCore import Qt, QRect, QPoint, Signal
 
 from backend.models import ScreenRegion
 
 class RegionSelector(QWidget):
-    """A full-screen, translucent overlay for drawing a bounding box."""
+    """A translucent overlay for drawing a bounding box on a specific screen."""
     
     region_selected = Signal(ScreenRegion)
-    selection_cancelled = Signal() # <--- 1. ADD THIS NEW SIGNAL
+    selection_cancelled = Signal()
 
-    def __init__(self):
+    def __init__(self, screen_geometry):
         super().__init__()
         
         self.setWindowFlags(
@@ -21,18 +21,11 @@ class RegionSelector(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
-        screens = QApplication.screens()
-        if not screens:
-            self.setGeometry(0, 0, 800, 600)
-        else:
-            total_rect = screens[0].geometry()
-            for screen in screens[1:]:
-                total_rect = total_rect.united(screen.geometry())
-            self.setGeometry(total_rect)
+        # Instead of spanning all monitors, this instance perfectly covers ONE monitor
+        self.setGeometry(screen_geometry)
 
         self.rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
         
-        # Mantaray Blue styling
         self.rubber_band.setStyleSheet("""
             QRubberBand {
                 background-color: rgba(42, 59, 122, 100);
@@ -62,9 +55,13 @@ class RegionSelector(QWidget):
             selection_rect = self.rubber_band.geometry()
             self.rubber_band.hide()
             
+            # CRITICAL FIX: Convert the local widget coordinates to global desktop coordinates
+            # This ensures that drawing on Monitor 2 doesn't return X=0, but rather X=1920
+            global_top_left = self.mapToGlobal(selection_rect.topLeft())
+            
             region = ScreenRegion(
-                x=selection_rect.x(),
-                y=selection_rect.y(),
+                x=global_top_left.x(),
+                y=global_top_left.y(),
                 width=selection_rect.width(),
                 height=selection_rect.height()
             )
@@ -73,7 +70,6 @@ class RegionSelector(QWidget):
             self.close()
 
     def keyPressEvent(self, event: QKeyEvent):
-        """Allows the user to cancel selection safely by pressing Escape."""
         if event.key() == Qt.Key.Key_Escape:
             self.selection_cancelled.emit()
             self.close()

@@ -1,55 +1,87 @@
+import os
+import io
 import time
+import subprocess
+from PIL import Image
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtCore import QBuffer, QIODevice
 
 from backend.models import ScreenRegion, TranslationJob
 
 class CaptureHandler:
-    """Handles in-memory screen capture using native Qt bindings."""
+    """Handles screen capture on Wayland by delegating to native trusted tools (Spectacle)."""
     
     def __init__(self):
-        # We grab the running PySide6 application instance (created in main.py)
-        self.app = QGuiApplication.instance()
-        if not self.app:
-            raise RuntimeError("QApplication must be initialized before CaptureHandler.")
+        # We will save the full-screen trusted capture to a temporary system file
+        self.temp_file = "/tmp/mantaray_full_screen.png"
+        print("KDE Spectacle Capture engine initialized.")
 
     def capture(self, region: ScreenRegion) -> TranslationJob:
-        """
-        Captures the specified region using Qt, converts it to PNG bytes, 
-        and packages it into a TranslationJob.
-        """
-        
-        # Get the primary screen (Qt handles the multi-monitor math for us)
-        screen = self.app.primaryScreen()
-        
-        # Grab the specific region from the root window (WId 0 is the full X11 desktop)
-        pixmap = screen.grabWindow(0, region.x, region.y, region.width, region.height)
-        
-        # Convert the QPixmap directly into PNG bytes in memory using a QBuffer
-        buffer = QBuffer()
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        pixmap.save(buffer, "PNG")
-        
-        # Extract the raw byte data and return it
-        return TranslationJob(image_bytes=buffer.data().data())
+        if not region:
+            return TranslationJob(image_bytes=b"")
+            
+        try:
+            # 1. Ask KDE's trusted native tool to take a full-desktop background screenshot
+            subprocess.run(["spectacle", "-f", "-b", "-n", "-o", self.temp_file], check=True)
+            img = Image.open(self.temp_file)
+            
+            # --- THE COORDINATE & HiDPI FIX ---
+            app = QGuiApplication.instance()
+            
+            # Find the global minimums (Top-Left of the entire virtual desktop map)
+            min_x = min(screen.geometry().x() for screen in app.screens())
+            min_y = min(screen.geometry().y() for screen in app.screens())
+            
+            # Convert the region's local widget coordinates back to global desktop coordinates
+            global_x = region.x + min_x
+            global_y = region.y + min_y
+            
+            # Find the DPI Scaling factor for the specific monitor the user drew the box on
+            ratio = 1.0
+            for screen in app.screens():
+                if screen.geometry().contains(global_x, global_y):
+                    ratio = screen.devicePixelRatio()
+                    break
+            
+            # Multiply the logical Qt coordinates by the monitor's physical scaling ratio
+            crop_box = (
+                int(region.x * ratio), 
+                int(region.y * ratio), 
+                int((region.x + region.width) * ratio), 
+                int((region.y + region.height) * ratio)
+            )
+            # -----------------------------------
+            
+            cropped_img = img.crop(crop_box)
+            
+            buffer = io.BytesIO()
+            cropped_img.save(buffer, format="PNG")
+            
+            return TranslationJob(image_bytes=buffer.getvalue())
+            
+        except Exception as e:
+            print(f"❌ Capture Error: {e}")
+            return TranslationJob(image_bytes=b"")
 
     def close(self):
-        """Clean up if necessary (Qt handles most of its own garbage collection)."""
-        pass
+        """Clean up the temporary screenshot file when Mantaray closes."""
+        if os.path.exists(self.temp_file):
+            os.remove(self.temp_file)
 
 # --- STANDALONE TEST FUNCTION ---
 
 def test_capture():
-    """Runs a local test of the capture system."""
-    print("Initializing Qt CaptureHandler...")
+    """Runs a local test of the Spectacle capture system."""
+    print("Initializing Spectacle CaptureHandler...")
+    # Mocking QApplication for the standalone test so the Qt math works
     app = QGuiApplication.instance() or QGuiApplication([])
     
     handler = CaptureHandler()
+    
+    # Grab a small chunk of the top-left corner
     test_region = ScreenRegion(x=0, y=0, width=500, height=200)
     print(f"\nTargeting Region: {test_region}")
     
     try:
-        # Time the capture
         start_time = time.time()
         job = handler.capture(test_region)
         end_time = time.time()
@@ -57,14 +89,21 @@ def test_capture():
         capture_time_ms = (end_time - start_time) * 1000
         
         if job and job.image_bytes:
-            print(" Capture Successful!")
+            print("✅ Capture Successful!")
             print(f" Image payload size: {len(job.image_bytes)} bytes")
             print(f" Capture latency: {capture_time_ms:.2f} ms\n")
+            
+            with open("test_spectacle_capture.png", "wb") as f:
+                f.write(job.image_bytes)
+            print("Saved cropped test frame to 'test_spectacle_capture.png'. Check it to verify!")
+                
         else:
-            print("  Capture failed: No bytes returned.")
+            print("❌ Capture failed: No bytes returned.")
             
     except Exception as e:
-         print(f"-- Error during capture: {e}")
+         print(f"❌ Error during capture: {e}")
+    finally:
+         handler.close()
 
 if __name__ == "__main__":
     test_capture()

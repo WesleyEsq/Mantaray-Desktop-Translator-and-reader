@@ -5,3 +5,5 @@ ollama>=0.1.7
 python-dotenv>=1.0.0
 Pillow>=10.2.0
 pyqtdarktheme>=2.1.0
+opencv-python>=4.13
+numpy>=2.0.0

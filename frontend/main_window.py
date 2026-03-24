@@ -1,26 +1,24 @@
 import time 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QStyle
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import QSize
 
 from backend.capture_handler import CaptureHandler
 from backend.ocr_handler import OCRHandler
 from backend.llm_handler import LLMHandler
 
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import QSize
-
-# Import our modular pages
 from frontend.pages.loading_page import LoadingPage
 from frontend.pages.controls_page import ControlsPage
 from frontend.pages.config_page import ConfigPage
 from frontend.pages.guide_page import GuidePage
 
-#import the functionality for screen translation
 from frontend.selector import RegionSelector
-from frontend.overlay import TranslationOverlay
+from frontend.chat_window import ChatWindow
+
+from config import CONFIG
 
 class BackendLoaderThread(QThread):
-    """Loads the heavy AI models in the background to prevent UI freezing."""
     finished_loading = Signal(object, object, object) 
 
     def run(self):
@@ -30,8 +28,8 @@ class BackendLoaderThread(QThread):
         self.finished_loading.emit(capture, ocr, llm)
 
 class TranslationPipelineThread(QThread):
-    """Runs the continuous Capture -> OCR -> LLM loop in the background."""
-    translation_ready = Signal(str)
+    """Runs the continuous Capture -> OCR -> LLM loop with Debounce protection."""
+    translation_ready = Signal(str, str) # Now emits (Japanese, English)
     status_update = Signal(str)
 
     def __init__(self, capture, ocr, llm):
@@ -41,7 +39,11 @@ class TranslationPipelineThread(QThread):
         self.llm = llm
         self.region = None
         self.running = False
-        self.last_text = ""
+        
+        self.last_translated_text = ""
+        self.current_ocr_text = ""
+        self.stability_counter = 0
+        self.STABILITY_THRESHOLD = 3 
 
     def run(self):
         self.running = True
@@ -53,52 +55,60 @@ class TranslationPipelineThread(QThread):
             # 1. Capture the screen
             job = self.capture.capture(self.region)
             
-            # 2. Extract Japanese Text
+            # --- DEBUG MODE RESTORED ---
+            if CONFIG.DEBUG_MODE and job.image_bytes:
+                with open("debug_last_capture.png", "wb") as f:
+                    f.write(job.image_bytes)
+            # ---------------------------
+            
             job = self.ocr.process(job)
+            raw_text = job.raw_japanese
 
-            # 3. Only translate if new text appeared
-            if job.raw_japanese and job.raw_japanese != self.last_text:
-                self.status_update.emit("Translating...")
-                self.last_text = job.raw_japanese
-                
-                # 4. Translate via LLM
-                job = self.llm.translate(job)
-                self.translation_ready.emit(job.english_translation)
-                self.status_update.emit("Monitoring screen...")
+            # 2. Debounce Logic
+            if raw_text:
+                if raw_text == self.current_ocr_text:
+                    self.stability_counter += 1
+                else:
+                    self.current_ocr_text = raw_text
+                    self.stability_counter = 0
+                    self.status_update.emit("Reading text...")
 
-            time.sleep(0.5) # Sleep to prevent CPU thrashing
+                # 3. Translate if stable
+                if self.stability_counter >= self.STABILITY_THRESHOLD and raw_text != self.last_translated_text:
+                    self.status_update.emit("Translating via API...")
+                    self.last_translated_text = raw_text
+                    
+                    job = self.llm.translate(job)
+                    
+                    # Send both JP and EN back to the UI
+                    self.translation_ready.emit(job.raw_japanese, job.english_translation)
+                    self.status_update.emit("Monitoring screen...")
+
+            time.sleep(0.5) 
 
     def stop(self):
         self.running = False
 
 class MantarayMainWindow(QWidget):
-    """The primary UI window orchestrating the different application pages."""
-    
     def __init__(self):
         super().__init__()
         
-        self.setWindowTitle("Manta - Desktop AI Reader")
+        self.setWindowTitle("Mantaray - Desktop AI Reader")
         self.resize(350, 480) 
         
-        # Store our backend handlers here once they load
         self.capture_handler = None
         self.ocr_handler = None
         self.llm_handler = None
-        # Region on screen that needs a translation 
         self.current_region = None
+        self.bounding_box = None # <--- NEW: Store the visual indicator
         
-        # --- Master Layout ---
         self.lyt_main = QVBoxLayout(self)
-        self.lyt_main.setContentsMargins(0, 0, 0, 0) # Remove edge gaps for header/footer
+        self.lyt_main.setContentsMargins(0, 0, 0, 0)
         self.lyt_main.setSpacing(0)
         
-        # 1. Build Header
         self._build_header()
         
-        # 2. Build Stacked Central Area (The Deck of Cards)
         self.stk_pages = QStackedWidget()
-        
-        # Instantiate our modular pages, passing 'self' so they can trigger navigation
         self.page_loading = LoadingPage()
         self.page_controls = ControlsPage(self) 
         self.page_config = ConfigPage(self)
@@ -109,20 +119,15 @@ class MantarayMainWindow(QWidget):
         self.stk_pages.addWidget(self.page_config)
         self.stk_pages.addWidget(self.page_guide)
         
-        # 3. Build Footer
         self._build_footer()
         
-        # Assemble Master Layout
         self.lyt_main.addWidget(self.wg_header)
         self.lyt_main.addWidget(self.stk_pages, stretch=1)
         self.lyt_main.addWidget(self.lbl_footer)
         
-        # Start State
         self.switch_page(self.page_loading, "loading the model...")
         self.start_backend_loader()
 
-    # --- UI Builders ---
-    
     def _build_header(self):
         self.wg_header = QWidget()
         self.wg_header.setStyleSheet("background-color: #2a3b7a; color: white;")
@@ -131,23 +136,15 @@ class MantarayMainWindow(QWidget):
         lyt_header = QHBoxLayout(self.wg_header)
         lyt_header.setContentsMargins(15, 10, 15, 10)
         
-        # Guide Book Button (Circular SVG)
         self.btn_guide = QPushButton()
         self.btn_guide.setIcon(QIcon("assets/book.svg"))
-        self.btn_guide.setIconSize(QSize(25, 25)) # Size of the SVG inside the circle
-        self.btn_guide.setFixedSize(40, 40) # Make the button a perfect square
+        self.btn_guide.setIconSize(QSize(25, 25))
+        self.btn_guide.setFixedSize(40, 40)
         self.btn_guide.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(255, 255, 255, 0.8); 
-                border-radius: 18px; 
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 255, 255, 1);
-            }
+            QPushButton { background-color: rgba(255, 255, 255, 0.8); border-radius: 18px; border: none; }
+            QPushButton:hover { background-color: rgba(255, 255, 255, 1); }
         """)
         self.btn_guide.clicked.connect(lambda: self.switch_page(self.page_guide, "User Guide"))
-        
         
         lbl_title = QLabel("Mantaray")
         lbl_title.setStyleSheet("font-size: 24px; font-weight: bold;")
@@ -155,7 +152,6 @@ class MantarayMainWindow(QWidget):
         lyt_header.addWidget(self.btn_guide)
         lyt_header.addWidget(lbl_title)
         lyt_header.addStretch()
-        
 
     def _build_footer(self):
         self.lbl_footer = QLabel()
@@ -163,41 +159,31 @@ class MantarayMainWindow(QWidget):
         self.lbl_footer.setMinimumHeight(40)
         self.lbl_footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    # --- Logic Methods ---
-
     def set_status(self, message: str):
-        """Updates the text in the bottom footer."""
         self.lbl_footer.setText(message)
 
     def switch_page(self, page: QWidget, status: str):
-        """Changes the visible card in the stacked widget and updates the footer."""
         self.stk_pages.setCurrentWidget(page)
         self.set_status(status)
 
     def start_backend_loader(self):
-        """Spawns the thread to load the heavy models."""
         self.loader_thread = BackendLoaderThread()
         self.loader_thread.finished_loading.connect(self.on_backend_loaded)
         self.loader_thread.start()
 
     def on_backend_loaded(self, capture, ocr, llm):
-        """Triggered when the background thread finishes loading."""
         self.capture_handler = capture
         self.ocr_handler = ocr
         self.llm_handler = llm
         
-        # Initialize the continuous pipeline thread
         self.pipeline_thread = TranslationPipelineThread(capture, ocr, llm)
         self.pipeline_thread.translation_ready.connect(self.on_translation_ready)
         self.pipeline_thread.status_update.connect(self.set_status)
         
-        # Initialize the Overlay window (keep it hidden for now)
-        self.overlay = TranslationOverlay()
+        self.chat_window = ChatWindow() # <--- Initialize the new chat window
         
         self.switch_page(self.page_controls, "Ready.")
 
-    # --- Pipeline Control Methods (Triggered by controls_page.py) ---
-    
     def on_start(self):
         if not self.current_region:
             self.set_status("Error: Please select a capture region first!")
@@ -207,9 +193,9 @@ class MantarayMainWindow(QWidget):
         self.page_controls.btn_stop.setEnabled(True)
         self.set_status("Starting translation engine...")
         
-        # Pass the region to the thread, show the overlay, and start the loop!
+        self.chat_window.show() # <--- Show the window
+            
         self.pipeline_thread.region = self.current_region
-        self.overlay.show()
         self.pipeline_thread.start()
         
     def on_stop(self):
@@ -217,38 +203,51 @@ class MantarayMainWindow(QWidget):
         self.page_controls.btn_stop.setEnabled(False)
         self.set_status("Paused.")
         
-        # Stop the background loop and hide the overlay
         self.pipeline_thread.stop()
-        self.pipeline_thread.wait() # Safely wait for the thread to close
-        self.overlay.hide()
+        self.pipeline_thread.wait()
         
-    def on_translation_ready(self, english_text):
-        """Triggered by the pipeline thread when a new translation is ready."""
-        self.overlay.update_text(english_text)
+    def on_translation_ready(self, jp_text, en_text):
+        self.chat_window.append_translation(jp_text, en_text)
         
-    # ---------------------------------------------
-    #         SCREEN REGION SELECTION LOGIC
-    # ---------------------------------------------
     def open_selector(self):
-        """Hides the main menu and opens the full-screen selector tool."""
         self.hide() 
-        
-        self.selector = RegionSelector()
-        self.selector.region_selected.connect(self.on_region_selected)
-        
-        # 1. Listen for the cancel signal
-        self.selector.selection_cancelled.connect(self.on_selection_cancelled) 
-        
-        self.selector.show()
+        self.selectors = [] # Keep a list of all active overlays
+        from PySide6.QtWidgets import QApplication
+        # Spawn a perfect overlay for EVERY monitor connected to the PC
+        for screen in QApplication.screens():
+            selector = RegionSelector(screen.geometry())
+            selector.region_selected.connect(self.on_region_selected)
+            selector.selection_cancelled.connect(self.on_selection_cancelled) 
+            selector.show()
+            self.selectors.append(selector)
         
     def on_region_selected(self, region):
-        """Triggered when the user finishes dragging the bounding box."""
         self.current_region = region
+        # Close all the selector overlays since we got our box
+        for selector in self.selectors:
+            selector.close()
+        self.selectors.clear()
         self.show() 
         self.set_status(f"Target locked: {region.width}x{region.height} px")
 
-    # 2. Add this new method to handle the cancellation safely
     def on_selection_cancelled(self):
-        """Triggered when the user presses Escape during selection."""
-        self.show() # Bring the main menu back!
+        # Safely close all overlays if the user hits Escape
+        for selector in self.selectors:
+            selector.close()
+        self.selectors.clear()
+        
+        self.show() 
         self.set_status("Selection cancelled.")
+
+    def closeEvent(self, event):
+        """Catches the Window Close event to safely kill background threads."""
+        print("Shutting down Mantaray...")
+        if hasattr(self, 'pipeline_thread') and self.pipeline_thread.isRunning():
+            self.pipeline_thread.stop()
+            self.pipeline_thread.wait() 
+            
+        if hasattr(self, 'chat_window'):
+            self.chat_window.close() # <--- Safely close the chat window
+            
+        event.accept()
+        print("Shutdown complete.")

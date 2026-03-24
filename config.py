@@ -8,7 +8,8 @@ load_dotenv()
 @dataclass
 class AppConfig:
     """Centralized configuration for the Desktop AI Reader."""
-    
+    # This enables or disables the debug mode
+    DEBUG_MODE: bool = True       
     # API & LLM Settings
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
