@@ -10,7 +10,7 @@ from frontend.main_window import MantarayMainWindow
 
 def main():
     app = QApplication(sys.argv)
-    qdarktheme.setup_theme("auto")
+    qdarktheme.setup_theme("light")
     
     window = MantarayMainWindow()
     window.show()

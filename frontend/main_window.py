@@ -16,6 +16,8 @@ from frontend.pages.guide_page import GuidePage
 from frontend.selector import RegionSelector
 from frontend.chat_window import ChatWindow
 
+
+
 from config import CONFIG
 
 class BackendLoaderThread(QThread):
@@ -49,22 +51,27 @@ class TranslationPipelineThread(QThread):
         self.running = True
         while self.running:
             if not self.region:
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
 
-            # 1. Capture the screen
+            # Start total pipeline timer
+            loop_start = time.perf_counter()
+
+            # 1. Measure Capture Time
+            t0 = time.perf_counter()
             job = self.capture.capture(self.region)
+            t1 = time.perf_counter()
+            capture_time = (t1 - t0) * 1000 # Convert to milliseconds
             
-            # --- DEBUG MODE RESTORED ---
-            if CONFIG.DEBUG_MODE and job.image_bytes:
-                with open("debug_last_capture.png", "wb") as f:
-                    f.write(job.image_bytes)
-            # ---------------------------
-            
+            # 2. Measure OCR Time
+            t0 = time.perf_counter()
             job = self.ocr.process(job)
+            t1 = time.perf_counter()
+            ocr_time = (t1 - t0) * 1000
+            
             raw_text = job.raw_japanese
 
-            # 2. Debounce Logic
+            # 3. Debounce & Translate
             if raw_text:
                 if raw_text == self.current_ocr_text:
                     self.stability_counter += 1
@@ -73,18 +80,30 @@ class TranslationPipelineThread(QThread):
                     self.stability_counter = 0
                     self.status_update.emit("Reading text...")
 
-                # 3. Translate if stable
+                # Translate if stable
                 if self.stability_counter >= self.STABILITY_THRESHOLD and raw_text != self.last_translated_text:
                     self.status_update.emit("Translating via API...")
                     self.last_translated_text = raw_text
                     
+                    # Measure LLM Translation Time
+                    t0 = time.perf_counter()
                     job = self.llm.translate(job)
+                    t1 = time.perf_counter()
+                    llm_time = (t1 - t0) * 1000
                     
-                    # Send both JP and EN back to the UI
                     self.translation_ready.emit(job.raw_japanese, job.english_translation)
                     self.status_update.emit("Monitoring screen...")
+                    
+                    # --- PRINT THE LATENCY REPORT TO TERMINAL ---
+                    print("\n" + "="*40)
+                    print("> LATENCY REPORT:")
+                    print(f"   Screen Capture : {capture_time:.1f} ms")
+                    print(f"   EasyOCR        : {ocr_time:.1f} ms")
+                    print(f"   LLM API        : {llm_time:.1f} ms")
+                    print(f"   Total Pipeline : {(time.perf_counter() - loop_start) * 1000:.1f} ms")
+                    print("="*40 + "\n")
 
-            time.sleep(0.5) 
+            time.sleep(0.3)
 
     def stop(self):
         self.running = False

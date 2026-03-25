@@ -34,11 +34,21 @@ class AppConfig:
     
     # The default system prompt given to the LLM
     SYSTEM_PROMPT: str = (
-        "You are an expert Japanese to English translator specializing in visual novels and literature. "
-        "Translate the following Japanese text into natural, conversational English. "
+        "You are an expert Japanese to {target_lang} translator specializing in visual novels and literature. "
+        "Translate the following Japanese text into natural, conversational {target_lang}. "
         "Use the provided conversation history to correctly infer missing pronouns (I, you, he, she) "
-        "and contextual tone. Output ONLY the English translation, without any notes or formatting."
+        "and contextual tone. Output ONLY the {target_lang} translation, without any notes or formatting."
     )
+    
+    # Configuration for the Chat menu window
+    OVERLAY_FONT_FAMILY: str = "Segoe UI"
+    OVERLAY_FONT_SIZE: int = 28
+    OVERLAY_TEXT_COLOR: str = "#FFFFFF"   
+    OVERLAY_BG_COLOR: str = "rgba(0, 0, 0, 180)"
+    
+    # --- ADD THIS: Hardware Acceleration ---
+    USE_GPU: bool = True # Set to True if you have CUDA/NVIDIA installed
+    ACTIVE_ENGINE = "local"
 
 # Instantiate a global config object to be imported by other modules
 CONFIG = AppConfig()

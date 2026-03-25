@@ -1,36 +1,49 @@
 import io
+import easyocr
 from PIL import Image
-from manga_ocr import MangaOcr
+import numpy as np
+from config import CONFIG
 
 from backend.models import TranslationJob
 
 class OCRHandler:
-    """Handles extracting Japanese text from image bytes using manga-ocr."""
+    """Handles extracting and grouping Japanese text using EasyOCR."""
     
     def __init__(self):
-        # This initializes the AI model. It takes a few seconds to load into RAM.
-        print("Loading manga-ocr model into memory (this takes a moment)...")
-        self.mocr = MangaOcr()
+        print("Loading EasyOCR models into memory (this takes a moment)...")
+        # GPU=False ensures it works on any machine. Set to True if you have CUDA installed!
+        self.reader = easyocr.Reader(['ja', 'en'], gpu=CONFIG.USE_GPU)
         print("OCR Model loaded successfully!")
 
     def process(self, job: TranslationJob) -> TranslationJob:
-        """
-        Takes a TranslationJob containing image_bytes, runs the OCR, 
-        and updates the job with the extracted Japanese text.
-        """
         if not job.image_bytes:
-            print("OCR skipped: No image bytes provided.")
             return job
             
         try:
-            # 1. Convert the raw PNG bytes back into a Pillow Image object
-            image = Image.open(io.BytesIO(job.image_bytes))
+            # 1. Convert PNG bytes into a format EasyOCR can read (NumPy array)
+            image = Image.open(io.BytesIO(job.image_bytes)).convert('RGB')
+            img_array = np.array(image)
             
-            # 2. Feed the image to the model
-            extracted_text = self.mocr(image)
+            # 2. Run EasyOCR
+            results = self.reader.readtext(img_array)
             
-            # 3. Save the result to our job object (strip trailing whitespace)
-            job.raw_japanese = extracted_text.strip()
+            if not results:
+                job.raw_japanese = ""
+                return job
+
+            # 3. Clean and Group the Text
+            blocks = []
+            for (bbox, text, prob) in results:
+                # Clean up common EasyOCR punctuation mistakes
+                cleaned_text = text.replace('_', '、').replace(' ', '')
+                if cleaned_text:
+                    blocks.append(cleaned_text)
+
+            # 4. Smart Formatting
+            if blocks:
+                job.raw_japanese = "".join(blocks)
+            else:
+                job.raw_japanese = ""
             
         except Exception as e:
             print(f"OCR Processing Error: {e}")
@@ -39,28 +52,24 @@ class OCRHandler:
         return job
 
 # --- STANDALONE TEST FUNCTION ---
-
 def test_ocr():
-    """Runs a local test to ensure the model downloads and processes correctly."""
-    
-    print("Initializing OCRHandler...")
     handler = OCRHandler()
-    dummy_image = Image.new('RGB', (300, 100), color=(255, 255, 255))
-    byte_io = io.BytesIO()
-    dummy_image.save(byte_io, format='PNG')
     
-    
-    # Create a dummy job
-    dummy_job = TranslationJob(image_bytes=byte_io.getvalue())
-    print("Running OCR process...")
-    result_job = handler.process(dummy_job)
-    
-    # Output the results
-    print("-" * 40)
-    print(" OCR Pipeline Test Complete!")
-    print(f"Extracted Text: '{result_job.raw_japanese}'")
-    print("(Note: It is perfectly normal for this to be empty or gibberish since we fed it a blank white image.)")
-    print("-" * 40)
+    # Let's mock a job using the file you tested earlier
+    try:
+        with open("image_299413.jpg", "rb") as f:
+            dummy_bytes = f.read()
+            
+        dummy_job = TranslationJob(image_bytes=dummy_bytes)
+        print("\nRunning OCR process...")
+        result_job = handler.process(dummy_job)
+        
+        print("-" * 40)
+        print("OCR Pipeline Test Complete!")
+        print(f"Final Formatted String for LLM:\n{result_job.raw_japanese}")
+        print("-" * 40)
+    except FileNotFoundError:
+        print("Could not find test image. Run this from the root directory!")
 
 if __name__ == "__main__":
     test_ocr()
